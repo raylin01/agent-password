@@ -1,0 +1,14 @@
+{
+  "name": "agentpass",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Local encrypted password vault with opaque agent handles and runtime substitution.",
+  "bin": {
+    "agentpass": "./src/cli.mjs"
+  },
+  "scripts": {
+    "serve": "node ./src/cli.mjs serve",
+    "test": "node --test"
+  }
+}
