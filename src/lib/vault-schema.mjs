@@ -237,9 +237,10 @@ function normalizeEntry(entry) {
   const normalizedType = entry.entryType || "login";
   const normalizedKey = normalizeEntryKey(entry.key || entry.label || entry.site || entry.issuer || entry.id);
   const timestamp = entry.createdAt || nowIso();
+  const entryId = entry.id || randomId("entry_");
 
   return entrySummaryShape({
-    id: entry.id || randomId("entry_"),
+    id: entryId,
     key: normalizedKey,
     entryType: normalizedType,
     label: trimToUndefined(entry.label) || normalizedKey,
@@ -251,7 +252,7 @@ function normalizeEntry(entry) {
     updatedAt: entry.updatedAt || timestamp,
     fields: (entry.fields || []).map((field) => ({
       id: field.id || randomId("field_"),
-      entryId: field.entryId || entry.id || "",
+      entryId: field.entryId || entryId,
       fieldName: field.fieldName || field.name,
       fieldType: field.fieldType || field.fieldName || field.name,
       handle: field.handle || createHandle(normalizedKey, field.fieldName || field.name, 1),
