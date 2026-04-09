@@ -418,6 +418,8 @@ export class AgentPassService {
       throw new Error("Field value cannot be empty.");
     }
 
+    getFieldDefinition(entry.entryType, fieldName);
+
     const existingField = entry.fields.find((field) => field.fieldName === fieldName);
 
     if (existingField) {

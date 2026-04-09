@@ -1,6 +1,17 @@
-const username = "COSTCO_COM_USERNAME_1";
-const password = "COSTCO_COM_PASSWORD_1";
+import { chromium } from "playwright";
 
-console.log("Template received handles and replaced them before execution.");
-console.log(`username=${username}`);
-console.log(`password=${password}`);
+import { createAgentPassBrowser } from "../src/lib/browser-helper.mjs";
+
+const browser = await chromium.launch({
+  headless: false
+});
+const page = await browser.newPage();
+const secrets = await createAgentPassBrowser();
+
+await page.goto("https://example.com");
+
+// Replace selectors and URL with a real site when you use this template.
+await secrets.fillHandle(page, "#username", "COSTCO_COM_USERNAME_1", "https://example.com");
+await secrets.fillHandle(page, "#password", "COSTCO_COM_PASSWORD_1", "https://example.com");
+
+await browser.close();

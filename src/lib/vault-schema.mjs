@@ -229,7 +229,8 @@ export function sanitizeField(field) {
 export function sanitizeEntry(entry) {
   return entrySummaryShape({
     ...entry,
-    fields: (entry.fields || []).map(sanitizeField)
+    fields: (entry.fields || []).map(sanitizeField),
+    expectedFieldNames: fieldNamesForEntryType(entry.entryType)
   });
 }
 
