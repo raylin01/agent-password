@@ -20,9 +20,10 @@ Commands:
   agentpass unlock
   agentpass lock
   agentpass list [--json]
-  agentpass add-login <key> [--label <label>] [--site <url>] [--notes <text>] [--tags <csv>] [--prompt]
-  agentpass add-card <key> [--label <label>] [--issuer <issuer>] [--notes <text>] [--tags <csv>] [--prompt]
-  agentpass edit-entry <entry-id-or-key> [--label <label>] [--site <url>] [--issuer <issuer>] [--notes <text>] [--tags <csv>]
+  agentpass add-login --label <label> [--site <url>] [--notes <text>] [--tags <csv>] [--prompt]
+  agentpass add-card --label <label> [--issuer <issuer>] [--notes <text>] [--tags <csv>] [--prompt]
+  agentpass add-secret --label <label> [--provider <name>] [--field <name=value> ...] [--notes <text>] [--tags <csv>] [--prompt]
+  agentpass edit-entry <entry-id-or-label> [--label <label>] [--site <url>] [--issuer <issuer>] [--provider <name>] [--notes <text>] [--tags <csv>]
   agentpass edit-field <field-id-or-handle> [--value <value>] [--prompt] [--disabled true|false] [--allow-mode <mode>] [--allow-origins <csv>]
   agentpass remove-entry <entry-id-or-key>
   agentpass remove-field <field-id-or-handle>
@@ -86,11 +87,16 @@ function parseRepeatedValues(args, optionName) {
 }
 
 function formatEntry(entry) {
-  const scope = entry.entryType === "login" ? entry.site : entry.issuer;
-  const lines = [`${entry.label} (${entry.entryType})`, `  key: ${entry.key}`];
+  const scope = entry.entryType === "login"
+    ? entry.site
+    : (entry.entryType === "card" ? entry.issuer : entry.provider);
+  const scopeLabel = entry.entryType === "login"
+    ? "site"
+    : (entry.entryType === "card" ? "issuer" : "provider");
+  const lines = [`${entry.label} (${entry.entryType})`];
 
   if (scope) {
-    lines.push(`  scope: ${scope}`);
+    lines.push(`  ${scopeLabel}: ${scope}`);
   }
 
   if (entry.tags?.length) {
@@ -167,6 +173,53 @@ async function maybePromptValue(args, optionName, promptLabel, { secret = false,
   }
 
   return undefined;
+}
+
+function parseSecretFieldArgs(args) {
+  return parseRepeatedValues(args, "--field").map((value) => {
+    const separatorIndex = value.indexOf("=");
+
+    if (separatorIndex <= 0) {
+      throw new Error(`Invalid --field value: ${value}. Use name=value.`);
+    }
+
+    const name = value.slice(0, separatorIndex).trim();
+    const fieldValue = value.slice(separatorIndex + 1);
+
+    if (!name || !fieldValue.trim()) {
+      throw new Error(`Invalid --field value: ${value}. Use name=value.`);
+    }
+
+    return {
+      name,
+      value: fieldValue
+    };
+  });
+}
+
+async function promptSecretFields() {
+  const fields = [];
+
+  while (true) {
+    const name = (await promptLine("Field name (blank to finish): ")).trim();
+
+    if (!name) {
+      break;
+    }
+
+    const value = await promptSecret(`Value for ${name}: `);
+
+    if (!value.trim()) {
+      throw new Error(`Field ${name} cannot be empty.`);
+    }
+
+    fields.push({
+      name,
+      value
+    });
+  }
+
+  return fields;
 }
 
 async function runTemplateProcess({ templatePath, args, cwd, timeoutMs = 120000 }) {
@@ -274,16 +327,12 @@ async function run() {
   }
 
   if (commandName === "add-login") {
-    const [key, ...rest] = argv;
-
-    if (!key) {
-      throw new Error("Usage: agentpass add-login <key> [...]");
-    }
+    const rest = argv;
+    const label = parseOptionValue(rest, "--label");
 
     const promptAll = hasFlag(rest, "--prompt");
     const payload = {
-      key,
-      label: parseOptionValue(rest, "--label"),
+      label,
       site: parseOptionValue(rest, "--site"),
       notes: parseOptionValue(rest, "--notes"),
       tags: parseOptionValue(rest, "--tags"),
@@ -309,6 +358,10 @@ async function run() {
       }
     };
 
+    if (!payload.label) {
+      throw new Error("Usage: agentpass add-login --label <label> [...]");
+    }
+
     console.log(JSON.stringify(await api("/api/entries/login", {
       method: "POST",
       body: JSON.stringify(payload)
@@ -317,16 +370,12 @@ async function run() {
   }
 
   if (commandName === "add-card") {
-    const [key, ...rest] = argv;
-
-    if (!key) {
-      throw new Error("Usage: agentpass add-card <key> [...]");
-    }
+    const rest = argv;
+    const label = parseOptionValue(rest, "--label");
 
     const promptAll = hasFlag(rest, "--prompt");
     const payload = {
-      key,
-      label: parseOptionValue(rest, "--label"),
+      label,
       issuer: parseOptionValue(rest, "--issuer"),
       notes: parseOptionValue(rest, "--notes"),
       tags: parseOptionValue(rest, "--tags"),
@@ -360,7 +409,39 @@ async function run() {
       }
     };
 
+    if (!payload.label) {
+      throw new Error("Usage: agentpass add-card --label <label> [...]");
+    }
+
     console.log(JSON.stringify(await api("/api/entries/card", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    }), null, 2));
+    return;
+  }
+
+  if (commandName === "add-secret") {
+    const promptAll = hasFlag(argv, "--prompt");
+    const label = parseOptionValue(argv, "--label");
+    const directFields = parseSecretFieldArgs(argv);
+    const promptedFields = promptAll ? await promptSecretFields() : [];
+    const payload = {
+      label,
+      provider: parseOptionValue(argv, "--provider"),
+      notes: parseOptionValue(argv, "--notes"),
+      tags: parseOptionValue(argv, "--tags"),
+      fields: [...directFields, ...promptedFields]
+    };
+
+    if (!payload.label) {
+      throw new Error("Usage: agentpass add-secret --label <label> [--field <name=value> ...]");
+    }
+
+    if (!payload.fields.length) {
+      throw new Error("Provide at least one --field <name=value> or use --prompt.");
+    }
+
+    console.log(JSON.stringify(await api("/api/entries/secret", {
       method: "POST",
       body: JSON.stringify(payload)
     }), null, 2));
@@ -371,7 +452,7 @@ async function run() {
     const [identifier, ...rest] = argv;
 
     if (!identifier) {
-      throw new Error("Usage: agentpass edit-entry <entry-id-or-key> [...]");
+      throw new Error("Usage: agentpass edit-entry <entry-id-or-label> [...]");
     }
 
     console.log(JSON.stringify(await api(`/api/entries/${encodeURIComponent(identifier)}`, {
@@ -380,6 +461,7 @@ async function run() {
         label: parseOptionValue(rest, "--label"),
         site: parseOptionValue(rest, "--site"),
         issuer: parseOptionValue(rest, "--issuer"),
+        provider: parseOptionValue(rest, "--provider"),
         notes: parseOptionValue(rest, "--notes"),
         tags: parseOptionValue(rest, "--tags")
       })
@@ -431,7 +513,7 @@ async function run() {
     const [identifier] = argv;
 
     if (!identifier) {
-      throw new Error("Usage: agentpass remove-entry <entry-id-or-key>");
+      throw new Error("Usage: agentpass remove-entry <entry-id-or-label>");
     }
 
     console.log(JSON.stringify(await api(`/api/entries/${encodeURIComponent(identifier)}`, {

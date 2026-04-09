@@ -140,6 +140,7 @@ input,select,textarea{font:inherit;color:var(--text)}
 .e-icon{width:32px;height:32px;border-radius:var(--r);display:flex;align-items:center;justify-content:center;flex-shrink:0;font-size:13px;font-weight:600}
 .e-icon.login{background:#e8f2ff;color:var(--accent)}
 .e-icon.card{background:#f3e8ff;color:#8b5cf6}
+.e-icon.secret{background:#ecfdf3;color:#059669}
 .e-icon svg{width:16px;height:16px}
 .e-body{flex:1;min-width:0}
 .e-label{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
@@ -159,6 +160,7 @@ input,select,textarea{font:inherit;color:var(--text)}
 .detail-icon{width:44px;height:44px;border-radius:var(--r-lg);display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:600;flex-shrink:0}
 .detail-icon.login{background:#e8f2ff;color:var(--accent)}
 .detail-icon.card{background:#f3e8ff;color:#8b5cf6}
+.detail-icon.secret{background:#ecfdf3;color:#059669}
 .detail-icon svg{width:20px;height:20px}
 .detail-info{flex:1;min-width:0}
 .detail-info h2{font-size:18px;font-weight:600;letter-spacing:-.02em;margin-bottom:2px}
@@ -167,6 +169,7 @@ input,select,textarea{font:inherit;color:var(--text)}
 .detail-type-badge{display:inline-block;font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.04em;padding:2px 7px;border-radius:99px;margin-bottom:6px}
 .detail-type-badge.login{background:var(--accent-bg);color:var(--accent)}
 .detail-type-badge.card{background:#f3e8ff;color:#8b5cf6}
+.detail-type-badge.secret{background:#ecfdf3;color:#059669}
 
 /* Detail metadata form */
 .meta-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:20px}
@@ -222,6 +225,9 @@ input,select,textarea{font:inherit;color:var(--text)}
 .add-form{max-width:520px}
 .add-form .meta-field{margin-bottom:4px}
 .add-form .form-sep{height:1px;background:var(--border-lt);margin:16px 0}
+.secret-field-list{display:flex;flex-direction:column;gap:8px;margin-top:12px}
+.secret-field-row{display:grid;grid-template-columns:1fr 1fr auto;gap:8px;align-items:end}
+.secret-field-row .meta-field{margin-bottom:0}
 
 /* Logs page */
 .log-table{border:1px solid var(--border);border-radius:var(--r-lg);background:var(--surface);overflow:auto}
@@ -344,6 +350,7 @@ input,select,textarea{font:inherit;color:var(--text)}
     search: "",
     filter: "all",
     addType: "login",
+    secretDraftFields: [{ name: "", value: "" }],
     expanded: {},
     totp: {},
     editingEntry: false
@@ -374,6 +381,31 @@ input,select,textarea{font:inherit;color:var(--text)}
     if (sec < 86400) return Math.floor(sec / 3600) + "h ago";
     if (sec < 2592000) return Math.floor(sec / 86400) + "d ago";
     return d.toLocaleDateString();
+  }
+
+  function entryIcon(entryType) {
+    if (entryType === "login") return I.key;
+    if (entryType === "card") return I.card;
+    return I.shield;
+  }
+
+  function entryScopeLabel(entryType) {
+    if (entryType === "login") return "Site";
+    if (entryType === "card") return "Issuer";
+    return "Provider";
+  }
+
+  function entryScope(entry) {
+    if (!entry) return "";
+    if (entry.entryType === "login") return entry.site || "";
+    if (entry.entryType === "card") return entry.issuer || "";
+    return entry.provider || "";
+  }
+
+  function ensureSecretDraftFields() {
+    if (!state.secretDraftFields.length) {
+      state.secretDraftFields = [{ name: "", value: "" }];
+    }
   }
 
   // --- Icons ---
@@ -550,9 +582,13 @@ input,select,textarea{font:inherit;color:var(--text)}
     if (q) {
       filtered = filtered.filter(function(e) {
         return (e.label || "").toLowerCase().indexOf(q) !== -1 ||
-               (e.key || "").toLowerCase().indexOf(q) !== -1 ||
                (e.site || "").toLowerCase().indexOf(q) !== -1 ||
                (e.issuer || "").toLowerCase().indexOf(q) !== -1 ||
+               (e.provider || "").toLowerCase().indexOf(q) !== -1 ||
+               (e.fields || []).some(function(field) {
+                 return (field.fieldName || "").toLowerCase().indexOf(q) !== -1 ||
+                        (field.handle || "").toLowerCase().indexOf(q) !== -1;
+               }) ||
                (e.tags || []).join(" ").toLowerCase().indexOf(q) !== -1;
       });
     }
@@ -566,6 +602,7 @@ input,select,textarea{font:inherit;color:var(--text)}
     html += '<button class="fpill' + (state.filter === "all" ? " active" : "") + '" data-action="filter" data-val="all">All</button>';
     html += '<button class="fpill' + (state.filter === "login" ? " active" : "") + '" data-action="filter" data-val="login">Logins</button>';
     html += '<button class="fpill' + (state.filter === "card" ? " active" : "") + '" data-action="filter" data-val="card">Cards</button>';
+    html += '<button class="fpill' + (state.filter === "secret" ? " active" : "") + '" data-action="filter" data-val="secret">Secrets</button>';
     html += '</div></div>';
 
     html += '<div class="vault-list">';
@@ -574,14 +611,12 @@ input,select,textarea{font:inherit;color:var(--text)}
     } else {
       for (var i = 0; i < filtered.length; i++) {
         var e = filtered[i];
-        var isLogin = e.entryType === "login";
-        var scope = isLogin ? e.site : e.issuer;
+        var scope = entryScope(e);
         html += '<a href="#/entry/' + encodeURIComponent(e.id) + '" class="entry-row">';
-        html += '<div class="e-icon ' + esc(e.entryType) + '">' + (isLogin ? I.key : I.card) + '</div>';
+        html += '<div class="e-icon ' + esc(e.entryType) + '">' + entryIcon(e.entryType) + '</div>';
         html += '<div class="e-body">';
-        html += '<div class="e-label">' + esc(e.label || e.key) + '</div>';
+        html += '<div class="e-label">' + esc(e.label) + '</div>';
         html += '<div class="e-meta">';
-        html += '<code>' + esc(e.key) + '</code>';
         if (scope) html += '<span>' + esc(scope) + '</span>';
         html += '</div></div>';
         html += '<div class="e-badges">';
@@ -607,19 +642,18 @@ input,select,textarea{font:inherit;color:var(--text)}
     }
     if (!entry) return '<a href="#/vault" class="back-link">' + I.chevL + ' Back to vault</a><p style="color:var(--text2)">Entry not found.</p>';
 
-    var isLogin = entry.entryType === "login";
-    var scope = isLogin ? entry.site : entry.issuer;
-    var scopeLabel = isLogin ? "Site" : "Issuer";
+    var scope = entryScope(entry);
+    var scopeLabel = entryScopeLabel(entry.entryType);
 
     var html = '<a href="#/vault" class="back-link">' + I.chevL + ' Vault</a>';
 
     // Header
     html += '<div class="detail-hdr">';
-    html += '<div class="detail-icon ' + esc(entry.entryType) + '">' + (isLogin ? I.key : I.card) + '</div>';
+    html += '<div class="detail-icon ' + esc(entry.entryType) + '">' + entryIcon(entry.entryType) + '</div>';
     html += '<div class="detail-info">';
     html += '<span class="detail-type-badge ' + esc(entry.entryType) + '">' + esc(entry.entryType) + '</span>';
-    html += '<h2>' + esc(entry.label || entry.key) + '</h2>';
-    html += '<span class="detail-key">' + esc(entry.key) + '</span>';
+    html += '<h2>' + esc(entry.label) + '</h2>';
+    if (scope) html += '<span class="detail-key">' + esc(scopeLabel + ": " + scope) + '</span>';
     html += '</div>';
     html += '<div class="detail-actions">';
     html += '<button class="btn btn-danger btn-sm" data-action="remove-entry" data-id="' + esc(entry.id) + '">' + I.trash + ' Delete</button>';
@@ -709,7 +743,15 @@ input,select,textarea{font:inherit;color:var(--text)}
     }
 
     // Add missing field
-    if (missingFields.length) {
+    if (entry.entryType === "secret") {
+      html += '<div class="add-field-row" data-entry-add="' + esc(entry.id) + '">';
+      html += '<h4>Add Field</h4>';
+      html += '<div class="adf-form">';
+      html += '<input data-role="missing-name" placeholder="Field name">';
+      html += '<input data-role="missing-value" placeholder="Value">';
+      html += '<button class="btn btn-primary btn-sm" data-action="add-field">' + I.plus + ' Add</button>';
+      html += '</div></div>';
+    } else if (missingFields.length) {
       html += '<div class="add-field-row" data-entry-add="' + esc(entry.id) + '">';
       html += '<h4>Add Missing Field</h4>';
       html += '<div class="adf-form">';
@@ -729,26 +771,28 @@ input,select,textarea{font:inherit;color:var(--text)}
 
   function renderAddPage() {
     var isLogin = state.addType === "login";
+    var isCard = state.addType === "card";
+    var isSecret = state.addType === "secret";
+    ensureSecretDraftFields();
     var html = '<div class="pg-hdr"><h1>Add Entry</h1></div>';
 
     html += '<div class="add-tabs">';
     html += '<button class="add-tab' + (isLogin ? " active" : "") + '" data-action="add-type" data-val="login">Login</button>';
-    html += '<button class="add-tab' + (!isLogin ? " active" : "") + '" data-action="add-type" data-val="card">Card</button>';
+    html += '<button class="add-tab' + (isCard ? " active" : "") + '" data-action="add-type" data-val="card">Card</button>';
+    html += '<button class="add-tab' + (isSecret ? " active" : "") + '" data-action="add-type" data-val="secret">Secret</button>';
     html += '</div>';
 
     html += '<div class="add-form">';
     if (isLogin) {
-      html += '<div class="meta-field"><label>Key *</label><input id="add-key" placeholder="e.g. costco.com"></div>';
-      html += '<div class="meta-field"><label>Label</label><input id="add-label" placeholder="e.g. Costco"></div>';
+      html += '<div class="meta-field"><label>Label *</label><input id="add-label" placeholder="e.g. Costco"></div>';
       html += '<div class="meta-field"><label>Site URL</label><input id="add-site" placeholder="https://www.costco.com"></div>';
       html += '<div class="form-sep"></div>';
       html += '<div class="meta-field"><label>Username</label><input id="add-username" placeholder="username"></div>';
       html += '<div class="meta-field"><label>Email</label><input id="add-email" placeholder="email@example.com"></div>';
       html += '<div class="meta-field"><label>Password</label><input id="add-password" type="password" placeholder="password"></div>';
       html += '<div class="meta-field"><label>TOTP Seed</label><input id="add-totp" placeholder="TOTP seed or otpauth:// URI"></div>';
-    } else {
-      html += '<div class="meta-field"><label>Key *</label><input id="add-key" placeholder="e.g. chase-visa"></div>';
-      html += '<div class="meta-field"><label>Label</label><input id="add-label" placeholder="e.g. Chase Visa"></div>';
+    } else if (isCard) {
+      html += '<div class="meta-field"><label>Label *</label><input id="add-label" placeholder="e.g. Chase Visa"></div>';
       html += '<div class="meta-field"><label>Issuer</label><input id="add-issuer" placeholder="e.g. Chase"></div>';
       html += '<div class="form-sep"></div>';
       html += '<div class="meta-field"><label>Cardholder Name</label><input id="add-name" placeholder="Full name on card"></div>';
@@ -761,12 +805,29 @@ input,select,textarea{font:inherit;color:var(--text)}
       html += '<div class="meta-field"><label>CVV</label><input id="add-cvv" placeholder="CVV" type="password"></div>';
       html += '<div class="meta-field"><label>Billing ZIP</label><input id="add-postal" placeholder="ZIP / postal code"></div>';
       html += '</div>';
+    } else {
+      html += '<div class="meta-field"><label>Label *</label><input id="add-label" placeholder="e.g. Cloudflare"></div>';
+      html += '<div class="meta-field"><label>Provider</label><input id="add-provider" placeholder="e.g. Cloudflare"></div>';
+      html += '<div class="form-sep"></div>';
+      html += '<div><label style="display:block;font-size:11px;font-weight:600;color:var(--text2);text-transform:uppercase;letter-spacing:.04em">Fields</label>';
+      html += '<div class="secret-field-list">';
+      for (var i = 0; i < state.secretDraftFields.length; i++) {
+        var draftField = state.secretDraftFields[i];
+        html += '<div class="secret-field-row" data-secret-row="' + i + '">';
+        html += '<div class="meta-field"><label>Field Name</label><input data-role="secret-name" data-secret-index="' + i + '" value="' + esc(draftField.name || "") + '" placeholder="e.g. api_token"></div>';
+        html += '<div class="meta-field"><label>Value</label><input data-role="secret-value" data-secret-index="' + i + '" value="' + esc(draftField.value || "") + '" placeholder="Value"></div>';
+        html += '<button class="btn btn-secondary btn-sm" data-action="remove-secret-row" data-index="' + i + '">Remove</button>';
+        html += '</div>';
+      }
+      html += '</div>';
+      html += '<div style="margin-top:10px"><button class="btn btn-secondary btn-sm" data-action="add-secret-row">' + I.plus + ' Add Field</button></div>';
+      html += '</div>';
     }
     html += '<div class="form-sep"></div>';
     html += '<div class="meta-field"><label>Tags</label><input id="add-tags" placeholder="comma separated tags"></div>';
     html += '<div class="meta-field"><label>Notes</label><textarea id="add-notes" placeholder="Optional notes"></textarea></div>';
     html += '<div style="margin-top:16px;display:flex;gap:8px">';
-    html += '<button class="btn btn-primary" data-action="submit-entry">' + I.check + ' Save ' + (isLogin ? "Login" : "Card") + '</button>';
+    html += '<button class="btn btn-primary" data-action="submit-entry">' + I.check + ' Save ' + (isLogin ? "Login" : (isCard ? "Card" : "Secret")) + '</button>';
     html += '<a href="#/vault" class="btn btn-secondary">Cancel</a>';
     html += '</div></div>';
     return html;
@@ -882,6 +943,21 @@ input,select,textarea{font:inherit;color:var(--text)}
 
     if (action === "add-type") {
       state.addType = btn.dataset.val;
+      if (state.addType === "secret") ensureSecretDraftFields();
+      render();
+      return;
+    }
+
+    if (action === "add-secret-row") {
+      state.secretDraftFields.push({ name: "", value: "" });
+      render();
+      return;
+    }
+
+    if (action === "remove-secret-row") {
+      var removeIndex = Number(btn.dataset.index);
+      state.secretDraftFields = state.secretDraftFields.filter(function(_, index) { return index !== removeIndex; });
+      ensureSecretDraftFields();
       render();
       return;
     }
@@ -933,7 +1009,8 @@ input,select,textarea{font:inherit;color:var(--text)}
         tags: grid.querySelector("[data-role='entry-tags']").value
       };
       if (entryType === "login") payload.site = grid.querySelector("[data-role='entry-scope']").value;
-      else payload.issuer = grid.querySelector("[data-role='entry-scope']").value;
+      else if (entryType === "card") payload.issuer = grid.querySelector("[data-role='entry-scope']").value;
+      else payload.provider = grid.querySelector("[data-role='entry-scope']").value;
 
       api("/api/entries/" + encodeURIComponent(entryId), { method: "PATCH", body: JSON.stringify(payload) })
         .then(function() { return refresh(); })
@@ -986,8 +1063,13 @@ input,select,textarea{font:inherit;color:var(--text)}
     if (action === "add-field") {
       var addRow = btn.closest("[data-entry-add]");
       var eId = addRow.dataset.entryAdd;
-      var fieldName = addRow.querySelector("[data-role='missing-name']").value;
+      var fieldNameEl = addRow.querySelector("[data-role='missing-name']");
+      var fieldName = fieldNameEl ? fieldNameEl.value : "";
       var fieldVal = addRow.querySelector("[data-role='missing-value']").value;
+      if (!fieldName.trim() || !fieldVal.trim()) {
+        toast("Field name and value are required", "error");
+        return;
+      }
       api("/api/entries/" + encodeURIComponent(eId) + "/fields", {
         method: "POST",
         body: JSON.stringify({ fieldName: fieldName, value: fieldVal })
@@ -999,13 +1081,14 @@ input,select,textarea{font:inherit;color:var(--text)}
     }
 
     if (action === "submit-entry") {
-      var key = document.getElementById("add-key");
-      if (!key || !key.value.trim()) { toast("Key is required", "error"); return; }
+      var labelEl = document.getElementById("add-label");
+      if (!labelEl || !labelEl.value.trim()) { toast("Label is required", "error"); return; }
 
       var isLogin = state.addType === "login";
-      var url = isLogin ? "/api/entries/login" : "/api/entries/card";
+      var isCard = state.addType === "card";
+      var isSecret = state.addType === "secret";
+      var url = isLogin ? "/api/entries/login" : (isCard ? "/api/entries/card" : "/api/entries/secret");
       var body = {
-        key: key.value.trim(),
         label: (document.getElementById("add-label") || {}).value || "",
         notes: (document.getElementById("add-notes") || {}).value || "",
         tags: (document.getElementById("add-tags") || {}).value || ""
@@ -1019,7 +1102,7 @@ input,select,textarea{font:inherit;color:var(--text)}
           password: (document.getElementById("add-password") || {}).value || "",
           totp_seed: (document.getElementById("add-totp") || {}).value || ""
         };
-      } else {
+      } else if (isCard) {
         body.issuer = (document.getElementById("add-issuer") || {}).value || "";
         body.fieldValues = {
           cardholder_name: (document.getElementById("add-name") || {}).value || "",
@@ -1029,11 +1112,27 @@ input,select,textarea{font:inherit;color:var(--text)}
           cvv: (document.getElementById("add-cvv") || {}).value || "",
           billing_postal_code: (document.getElementById("add-postal") || {}).value || ""
         };
+      } else if (isSecret) {
+        body.provider = (document.getElementById("add-provider") || {}).value || "";
+        body.fields = state.secretDraftFields
+          .filter(function(field) { return (field.name || "").trim() || (field.value || "").trim(); })
+          .map(function(field) {
+            return {
+              name: (field.name || "").trim(),
+              value: field.value || ""
+            };
+          });
+
+        if (!body.fields.length) {
+          toast("Add at least one field", "error");
+          return;
+        }
       }
 
       api(url, { method: "POST", body: JSON.stringify(body) })
         .then(function() { return refresh(); })
         .then(function() {
+          state.secretDraftFields = [{ name: "", value: "" }];
           toast("Entry created", "success");
           location.hash = "#/vault";
         })
@@ -1055,6 +1154,28 @@ input,select,textarea{font:inherit;color:var(--text)}
       api("/api/logs?limit=100").then(function(l) { state.logs = l; render(); toast("Logs refreshed", "info"); })
         .catch(function(err) { toast(err.message, "error"); });
       return;
+    }
+  });
+
+  document.getElementById("page").addEventListener("input", function(e) {
+    var target = e.target;
+
+    if (!target || !target.dataset) {
+      return;
+    }
+
+    if (target.dataset.role === "secret-name" || target.dataset.role === "secret-value") {
+      var index = Number(target.dataset.secretIndex);
+
+      if (!Number.isFinite(index) || !state.secretDraftFields[index]) {
+        return;
+      }
+
+      if (target.dataset.role === "secret-name") {
+        state.secretDraftFields[index].name = target.value;
+      } else {
+        state.secretDraftFields[index].value = target.value;
+      }
     }
   });
 

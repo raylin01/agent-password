@@ -75,6 +75,12 @@ export async function startServer({ host = "127.0.0.1", port = 4765, dataDir, va
         return;
       }
 
+      if (request.method === "POST" && url.pathname === "/api/entries/secret") {
+        const body = await readJsonBody(request);
+        sendJson(response, 200, await service.createSecretEntry(body, actor));
+        return;
+      }
+
       if (request.method === "GET" && url.pathname === "/api/logs") {
         sendJson(response, 200, await service.listLogs(Number(url.searchParams.get("limit") || 50)));
         return;
