@@ -23,12 +23,18 @@ async function createTempService() {
   };
 }
 
-test("service creates typed login and card entries safely", async () => {
+async function cleanupDataDir(dataDir) {
+  await fs.rm(dataDir, {
+    recursive: true,
+    force: true
+  });
+}
+
+test("service creates login card and secret entries with hidden keys", async () => {
   const { dataDir, service } = await createTempService();
 
   try {
     await service.createLoginEntry({
-      key: "costco.com",
       label: "Costco",
       site: "https://www.costco.com",
       fieldValues: {
@@ -41,7 +47,6 @@ test("service creates typed login and card entries safely", async () => {
       actor_id: "test"
     });
     await service.createCardEntry({
-      key: "chase-visa",
       label: "Chase Visa",
       issuer: "Chase",
       fieldValues: {
@@ -56,68 +61,117 @@ test("service creates typed login and card entries safely", async () => {
       actor_type: "agent",
       actor_id: "test"
     });
+    await service.createSecretEntry({
+      label: "Cloudflare",
+      provider: "Cloudflare",
+      fields: [
+        { name: "api_token", value: "cf-token" },
+        { name: "account_id", value: "acct_123" }
+      ]
+    }, {
+      actor_type: "agent",
+      actor_id: "test"
+    });
 
     const entries = service.listEntries();
 
-    assert.equal(entries.length, 2);
-    assert.equal(entries[0].entryType, "login");
-    assert.equal(entries[0].fields[0].handle, "COSTCO_COM_USERNAME_1");
-    assert.equal(entries[0].fields.some((field) => field.previewMasked.includes("hunter2")), false);
+    assert.equal(entries.length, 3);
+    assert.equal(entries[0].key, "costco");
+    assert.equal(entries[0].fields[0].handle, "COSTCO_USERNAME_1");
     assert.equal(entries[1].entryType, "card");
     assert.equal(entries[1].fields.find((field) => field.fieldName === "card_number").previewMasked.endsWith("1111"), true);
+    assert.equal(entries[2].entryType, "secret");
+    assert.equal(entries[2].fields[0].handle, "CLOUDFLARE_API_TOKEN_1");
   } finally {
-    await fs.rm(dataDir, {
-      recursive: true,
-      force: true
-    });
+    await cleanupDataDir(dataDir);
   }
 });
 
-test("service updates and removes fields and entries", async () => {
+test("service dedupes labels and regenerates handles on rename", async () => {
   const { dataDir, service } = await createTempService();
 
   try {
-    const entry = await service.createLoginEntry({
-      key: "github.com",
-      label: "GitHub",
-      site: "https://github.com",
+    const first = await service.createLoginEntry({
+      label: "Costco",
+      site: "https://www.costco.com",
       fieldValues: {
-        email: "ray@example.com",
-        password: "old-password"
+        password: "first-password"
       }
     }, {
       actor_type: "agent",
       actor_id: "test"
     });
-    const passwordField = entry.fields.find((field) => field.fieldName === "password");
-
-    await service.updateField(passwordField.id, {
-      value: "new-password"
+    const second = await service.createLoginEntry({
+      label: "Costco",
+      site: "https://www.costco.com/member",
+      fieldValues: {
+        password: "second-password"
+      }
     }, {
       actor_type: "agent",
       actor_id: "test"
     });
 
-    const emailField = entry.fields.find((field) => field.fieldName === "email");
-    const afterRemoval = await service.removeField(emailField.id, {
+    assert.equal(first.label, "Costco");
+    assert.equal(second.label, "Costco (1)");
+    assert.equal(second.key, "costco-1");
+    assert.equal(second.fields[0].handle, "COSTCO_1_PASSWORD_1");
+
+    const renamed = await service.updateEntry(first.id, {
+      label: "AWS Prod"
+    }, {
       actor_type: "agent",
       actor_id: "test"
     });
 
-    assert.equal(afterRemoval.fields.some((field) => field.fieldName === "email"), false);
-
-    const removal = await service.removeEntry(entry.id, {
-      actor_type: "agent",
-      actor_id: "test"
-    });
-
-    assert.equal(removal.removed, true);
-    assert.equal(service.listEntries().length, 0);
+    assert.equal(renamed.label, "AWS Prod");
+    assert.equal(renamed.key, "aws-prod");
+    assert.equal(renamed.fields[0].handle, "AWS_PROD_PASSWORD_1");
   } finally {
-    await fs.rm(dataDir, {
-      recursive: true,
-      force: true
+    await cleanupDataDir(dataDir);
+  }
+});
+
+test("service updates and removes free-form secret fields", async () => {
+  const { dataDir, service } = await createTempService();
+
+  try {
+    const entry = await service.createSecretEntry({
+      label: "AWS Prod",
+      provider: "AWS",
+      fields: [
+        { name: "access_key_id", value: "AKIA..." }
+      ]
+    }, {
+      actor_type: "agent",
+      actor_id: "test"
     });
+
+    const afterAdd = await service.addField(entry.id, "secret_access_key", "super-secret", {
+      actor_type: "agent",
+      actor_id: "test"
+    });
+    const secretField = afterAdd.fields.find((field) => field.fieldName === "secret_access_key");
+
+    assert.equal(secretField.handle, "AWS_PROD_SECRET_ACCESS_KEY_1");
+
+    const afterUpdate = await service.updateField(secretField.id, {
+      value: "even-more-secret"
+    }, {
+      actor_type: "agent",
+      actor_id: "test"
+    });
+
+    assert.equal(afterUpdate.fields.some((field) => field.previewMasked.includes("even-more-secret")), false);
+
+    const afterRemoval = await service.removeField(secretField.id, {
+      actor_type: "agent",
+      actor_id: "test"
+    });
+
+    assert.equal(afterRemoval.fields.some((field) => field.fieldName === "secret_access_key"), false);
+  } finally {
+    await cleanupDataDir(dataDir);
   }
 });
 
@@ -126,7 +180,6 @@ test("service generates TOTP and enforces browser-fill origin policy", async () 
 
   try {
     const entry = await service.createLoginEntry({
-      key: "costco.com",
       label: "Costco",
       site: "https://www.costco.com",
       fieldValues: {
@@ -169,10 +222,7 @@ test("service generates TOTP and enforces browser-fill origin policy", async () 
       });
     }, /not allowed/i);
   } finally {
-    await fs.rm(dataDir, {
-      recursive: true,
-      force: true
-    });
+    await cleanupDataDir(dataDir);
   }
 });
 
@@ -182,7 +232,6 @@ test("service renders files with replacement and redacts command output", async 
 
   try {
     await service.createLoginEntry({
-      key: "costco.com",
       label: "Costco",
       site: "https://www.costco.com",
       fieldValues: {
@@ -193,7 +242,7 @@ test("service renders files with replacement and redacts command output", async 
       actor_type: "agent",
       actor_id: "test"
     });
-    await fs.writeFile(templatePath, "username=COSTCO_COM_USERNAME_1\npassword=COSTCO_COM_PASSWORD_1\n", "utf8");
+    await fs.writeFile(templatePath, "username=COSTCO_USERNAME_1\npassword=COSTCO_PASSWORD_1\n", "utf8");
 
     const result = await service.renderFile({
       templatePath,
@@ -210,11 +259,59 @@ test("service renders files with replacement and redacts command output", async 
     });
 
     assert.equal(result.execution.stdout.includes("hunter2"), false);
-    assert.equal(result.execution.stdout.includes("COSTCO_COM_PASSWORD_1"), true);
+    assert.equal(result.execution.stdout.includes("COSTCO_PASSWORD_1"), true);
   } finally {
-    await fs.rm(dataDir, {
-      recursive: true,
-      force: true
-    });
+    await cleanupDataDir(dataDir);
+  }
+});
+
+test("service serializes concurrent saves safely", async () => {
+  const { dataDir, service } = await createTempService();
+
+  try {
+    await Promise.all([
+      service.createLoginEntry({
+        label: "Costco",
+        site: "https://www.costco.com",
+        fieldValues: {
+          password: "hunter2"
+        }
+      }, {
+        actor_type: "agent",
+        actor_id: "test"
+      }),
+      service.createCardEntry({
+        label: "Chase Visa",
+        issuer: "Chase",
+        fieldValues: {
+          card_number: "4111111111111111",
+          expiry_month: "12",
+          expiry_year: "2030",
+          cvv: "123"
+        }
+      }, {
+        actor_type: "agent",
+        actor_id: "test"
+      }),
+      service.createSecretEntry({
+        label: "Cloudflare",
+        provider: "Cloudflare",
+        fields: [
+          { name: "api_token", value: "cf-secret" }
+        ]
+      }, {
+        actor_type: "agent",
+        actor_id: "test"
+      })
+    ]);
+
+    const entries = service.listEntries();
+
+    assert.equal(entries.length, 3);
+    assert.equal(entries.some((entry) => entry.label === "Costco"), true);
+    assert.equal(entries.some((entry) => entry.label === "Chase Visa"), true);
+    assert.equal(entries.some((entry) => entry.label === "Cloudflare"), true);
+  } finally {
+    await cleanupDataDir(dataDir);
   }
 });

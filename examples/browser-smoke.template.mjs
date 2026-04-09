@@ -15,8 +15,8 @@ const fakePage = {
 
 const browser = await createAgentPassBrowser();
 
-await browser.fillHandle(fakePage, "#username", "COSTCO_COM_USERNAME_1");
-await browser.fillHandle(fakePage, "#password", "COSTCO_COM_PASSWORD_1");
+await browser.fillHandle(fakePage, "#username", "COSTCO_USERNAME_1");
+await browser.fillHandle(fakePage, "#password", "COSTCO_PASSWORD_1");
 
 console.log("Browser helper filled selectors:");
 console.log(JSON.stringify(filled, null, 2));

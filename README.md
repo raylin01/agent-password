@@ -13,11 +13,13 @@ V1 is built around a simple safety boundary:
 
 This is strong protection against accidental leakage into model context and normal logs. It is not full protection against a malicious local process with the same OS permissions.
 
-## V1 Features
+## V1.1 Features
 
 - AES-256-GCM encrypted vault file with `scrypt`-derived keys
 - login entries with `username`, `email`, `password`, and `TOTP seed`
 - credit card entries with `cardholder_name`, `card_number`, `expiry_month`, `expiry_year`, `cvv`, and `billing_postal_code`
+- free-form secret entries with arbitrary named fields such as `api_token`, `account_id`, `DATABASE_URL`, or `region`
+- hidden internal keys derived from labels with automatic label dedupe like `Costco`, `Costco (1)`, and `Costco (2)`
 - masked previews and opaque handles for sensitive fields
 - browser replacement through a Playwright-oriented helper
 - file replacement through temporary rendered files
@@ -44,7 +46,7 @@ node ./src/cli.mjs init
 Add a login:
 
 ```bash
-node ./src/cli.mjs add-login costco.com \
+node ./src/cli.mjs add-login \
   --label "Costco" \
   --site "https://www.costco.com" \
   --username "ray@example.com" \
@@ -55,7 +57,7 @@ node ./src/cli.mjs add-login costco.com \
 Add a card:
 
 ```bash
-node ./src/cli.mjs add-card chase-visa \
+node ./src/cli.mjs add-card \
   --label "Chase Visa" \
   --issuer "Chase" \
   --cardholder-name "Ray Lin" \
@@ -64,6 +66,17 @@ node ./src/cli.mjs add-card chase-visa \
   --expiry-year "2030" \
   --cvv "123" \
   --billing-postal-code "94105"
+```
+
+Add a free-form secret bundle:
+
+```bash
+node ./src/cli.mjs add-secret \
+  --label "Cloudflare" \
+  --provider "Cloudflare" \
+  --field api_token=super-secret-token \
+  --field account_id=acct_123 \
+  --field zone_id=zone_456
 ```
 
 List entries and handles:
@@ -75,7 +88,7 @@ node ./src/cli.mjs list
 Generate a TOTP code by handle:
 
 ```bash
-node ./src/cli.mjs totp COSTCO_COM_TOTP_SEED_1
+node ./src/cli.mjs totp COSTCO_TOTP_SEED_1
 ```
 
 Open the web UI:
