@@ -10,7 +10,7 @@ import { writeRenderedTempFile } from "./temp-files.mjs";
 import { generateTotp } from "./totp.mjs";
 import { normalizeEntryKey, nowIso, normalizeStringList, trimToUndefined } from "./util.mjs";
 import { readVault, vaultExists, writeVault } from "./vault-file.mjs";
-import { createEmptyVault, createSensitiveField, createEntry, fieldNamesForEntryType, getFieldDefinition, sanitizeEntry } from "./vault-schema.mjs";
+import { createEmptyVault, createSensitiveField, createEntry, fieldNamesForEntryType, getFieldDefinition, isFreeformEntryType, sanitizeEntry } from "./vault-schema.mjs";
 
 function makeLockedError() {
   const error = new Error("Vault is locked.");
@@ -43,6 +43,14 @@ function actionForUseMode(useMode) {
   }
 
   return "secret.use";
+}
+
+function normalizeLabelForCompare(label) {
+  return String(label ?? "").trim().toLowerCase();
+}
+
+function normalizeFieldNameForCompare(fieldName) {
+  return String(fieldName ?? "").trim().toLowerCase();
 }
 
 async function executeChildProcess({ command, cwd, env, timeoutMs = 120000, redactionMap = new Map() }) {
@@ -99,6 +107,7 @@ export class AgentPassService {
     this.auditLog = new AuditLog(this.paths);
     this.vault = null;
     this.passphrase = null;
+    this.saveQueue = Promise.resolve();
   }
 
   async status() {
@@ -181,9 +190,13 @@ export class AgentPassService {
 
   async save() {
     this.ensureUnlocked();
-    this.vault.updatedAt = nowIso();
-    await ensureDataPaths(this.paths);
-    await writeVault(this.paths.vaultPath, this.vault, this.passphrase);
+    const pendingSave = this.saveQueue.then(async () => {
+      this.vault.updatedAt = nowIso();
+      await ensureDataPaths(this.paths);
+      await writeVault(this.paths.vaultPath, this.vault, this.passphrase);
+    });
+    this.saveQueue = pendingSave.catch(() => {});
+    await pendingSave;
   }
 
   listEntries() {
@@ -199,9 +212,24 @@ export class AgentPassService {
 
   findEntry(identifier) {
     this.ensureUnlocked();
-    const normalizedKey = identifier ? normalizeEntryKey(identifier) : null;
+    let normalizedKey = null;
 
-    return this.vault.entries.find((entry) => entry.id === identifier || entry.key === identifier || entry.key === normalizedKey) || null;
+    if (identifier) {
+      try {
+        normalizedKey = normalizeEntryKey(identifier);
+      } catch {
+        normalizedKey = null;
+      }
+    }
+
+    const normalizedLabel = identifier ? normalizeLabelForCompare(identifier) : null;
+
+    return this.vault.entries.find((entry) => (
+      entry.id === identifier ||
+      entry.key === identifier ||
+      entry.key === normalizedKey ||
+      normalizeLabelForCompare(entry.label) === normalizedLabel
+    )) || null;
   }
 
   findField(identifier) {
@@ -221,10 +249,94 @@ export class AgentPassService {
     return null;
   }
 
+  deriveEntryKeyFromLabel(label) {
+    return normalizeEntryKey(label);
+  }
+
+  dedupeLabel(requestedLabel, excludingEntryId) {
+    this.ensureUnlocked();
+    const baseLabel = trimToUndefined(requestedLabel);
+
+    if (!baseLabel) {
+      throw new Error("A label is required.");
+    }
+
+    const dedupeBase = baseLabel.replace(/\s+\(\d+\)$/u, "").trim() || baseLabel;
+    const normalizedExistingLabels = new Set();
+    const existingKeys = new Set();
+
+    for (const entry of this.vault.entries) {
+      if (excludingEntryId && entry.id === excludingEntryId) {
+        continue;
+      }
+
+      normalizedExistingLabels.add(normalizeLabelForCompare(entry.label));
+      existingKeys.add(entry.key);
+    }
+
+    let suffix = 0;
+
+    while (suffix < 10000) {
+      const candidateLabel = suffix === 0 ? dedupeBase : `${dedupeBase} (${suffix})`;
+      const candidateKey = this.deriveEntryKeyFromLabel(candidateLabel);
+
+      if (!normalizedExistingLabels.has(normalizeLabelForCompare(candidateLabel)) && !existingKeys.has(candidateKey)) {
+        return candidateLabel;
+      }
+
+      suffix += 1;
+    }
+
+    throw new Error(`Unable to derive a unique label for ${baseLabel}.`);
+  }
+
+  findFieldByName(entry, fieldName) {
+    const normalizedFieldName = normalizeFieldNameForCompare(fieldName);
+    return entry.fields.find((field) => normalizeFieldNameForCompare(field.fieldName) === normalizedFieldName) || null;
+  }
+
+  regenerateEntryHandles(entry) {
+    const counts = new Map();
+
+    for (const field of entry.fields) {
+      const normalizedFieldName = String(field.fieldName ?? "").trim();
+      const nextIndex = (counts.get(normalizedFieldName) || 0) + 1;
+      counts.set(normalizedFieldName, nextIndex);
+      field.handle = createSensitiveField({
+        entryType: entry.entryType,
+        entryId: entry.id,
+        entryKey: entry.key,
+        fieldName: normalizedFieldName,
+        value: field.value,
+        policy: field.policy,
+        createdAt: field.createdAt,
+        updatedAt: field.updatedAt,
+        lastUsedAt: field.lastUsedAt
+      }).handle;
+      field.previewMasked = createSensitiveField({
+        entryType: entry.entryType,
+        entryId: entry.id,
+        entryKey: entry.key,
+        fieldName: normalizedFieldName,
+        value: field.value,
+        handle: field.handle,
+        policy: field.policy,
+        createdAt: field.createdAt,
+        updatedAt: field.updatedAt,
+        lastUsedAt: field.lastUsedAt
+      }).previewMasked;
+
+      if (nextIndex > 1) {
+        field.handle = field.handle.replace(/_1$/u, `_${nextIndex}`);
+      }
+    }
+  }
+
   async createTypedEntry(entryType, payload, actor) {
     this.ensureUnlocked();
 
-    const key = payload.key || payload.site || payload.issuer || payload.label;
+    const label = this.dedupeLabel(payload.label);
+    const key = this.deriveEntryKeyFromLabel(label);
     const fieldNames = fieldNamesForEntryType(entryType);
     const hasAtLeastOneValue = fieldNames.some((fieldName) => trimToUndefined(payload.fieldValues?.[fieldName]));
 
@@ -232,14 +344,10 @@ export class AgentPassService {
       throw new Error(`At least one ${entryType} field value is required.`);
     }
 
-    if (this.findEntry(key)) {
-      throw new Error(`Entry ${key} already exists.`);
-    }
-
     const entry = createEntry({
       entryType,
       key,
-      label: payload.label,
+      label,
       site: payload.site,
       issuer: payload.issuer,
       notes: payload.notes,
@@ -267,6 +375,60 @@ export class AgentPassService {
     return await this.createTypedEntry("card", payload, actor);
   }
 
+  async createSecretEntry(payload, actor) {
+    this.ensureUnlocked();
+    const label = this.dedupeLabel(payload.label);
+    const key = this.deriveEntryKeyFromLabel(label);
+    const fields = (payload.fields || [])
+      .map((field) => ({
+        name: trimToUndefined(field?.name),
+        value: trimToUndefined(field?.value),
+        policy: field?.policy
+      }))
+      .filter((field) => field.name || field.value);
+
+    if (!fields.length) {
+      throw new Error("At least one secret field is required.");
+    }
+
+    const seenFieldNames = new Set();
+
+    for (const field of fields) {
+      if (!field.name || !field.value) {
+        throw new Error("Each secret field requires both a name and a value.");
+      }
+
+      const normalizedFieldName = normalizeFieldNameForCompare(field.name);
+
+      if (seenFieldNames.has(normalizedFieldName)) {
+        throw new Error(`Duplicate secret field name: ${field.name}`);
+      }
+
+      seenFieldNames.add(normalizedFieldName);
+    }
+
+    const entry = createEntry({
+      entryType: "secret",
+      key,
+      label,
+      provider: payload.provider,
+      notes: payload.notes,
+      tags: payload.tags,
+      fields
+    });
+
+    this.vault.entries.push(entry);
+    await this.save();
+    await this.auditLog.append({
+      ...defaultActor(actor),
+      action: "entry.secret.add",
+      target_type: "entry",
+      target_id: entry.id
+    });
+
+    return sanitizeEntry(entry);
+  }
+
   async updateEntry(identifier, updates, actor) {
     this.ensureUnlocked();
     const entry = this.findEntry(identifier);
@@ -275,8 +437,17 @@ export class AgentPassService {
       throw new Error(`Entry ${identifier} was not found.`);
     }
 
-    if (trimToUndefined(updates.label)) {
-      entry.label = trimToUndefined(updates.label);
+    const nextLabelInput = trimToUndefined(updates.label);
+    const nextLabel = nextLabelInput ? this.dedupeLabel(nextLabelInput, entry.id) : entry.label;
+    const renamed = nextLabel !== entry.label;
+
+    if (nextLabelInput) {
+      entry.label = nextLabel;
+    }
+
+    if (renamed) {
+      entry.key = this.deriveEntryKeyFromLabel(nextLabel);
+      this.regenerateEntryHandles(entry);
     }
 
     if (updates.site !== undefined) {
@@ -285,6 +456,10 @@ export class AgentPassService {
 
     if (updates.issuer !== undefined) {
       entry.issuer = trimToUndefined(updates.issuer) || "";
+    }
+
+    if (updates.provider !== undefined) {
+      entry.provider = trimToUndefined(updates.provider) || "";
     }
 
     if (updates.notes !== undefined) {
@@ -299,7 +474,7 @@ export class AgentPassService {
     await this.save();
     await this.auditLog.append({
       ...defaultActor(actor),
-      action: "entry.update",
+      action: renamed ? "entry.rename" : "entry.update",
       target_type: "entry",
       target_id: entry.id
     });
@@ -326,6 +501,7 @@ export class AgentPassService {
 
       field.value = nextValue;
       field.previewMasked = createSensitiveField({
+        entryType: entry.entryType,
         entryId: entry.id,
         entryKey: entry.key,
         fieldName: field.fieldName,
@@ -418,9 +594,17 @@ export class AgentPassService {
       throw new Error("Field value cannot be empty.");
     }
 
-    getFieldDefinition(entry.entryType, fieldName);
+    const normalizedFieldName = trimToUndefined(fieldName);
 
-    const existingField = entry.fields.find((field) => field.fieldName === fieldName);
+    if (!normalizedFieldName) {
+      throw new Error("Field name is required.");
+    }
+
+    if (!isFreeformEntryType(entry.entryType)) {
+      getFieldDefinition(entry.entryType, normalizedFieldName);
+    }
+
+    const existingField = this.findFieldByName(entry, normalizedFieldName);
 
     if (existingField) {
       return await this.updateField(existingField.id, {
@@ -430,9 +614,10 @@ export class AgentPassService {
     }
 
     const createdField = createSensitiveField({
+      entryType: entry.entryType,
       entryId: entry.id,
       entryKey: entry.key,
-      fieldName,
+      fieldName: normalizedFieldName,
       value: nextValue,
       policy
     });

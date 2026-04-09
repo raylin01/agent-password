@@ -28,7 +28,7 @@ export async function readVault(vaultPath, passphrase) {
 export async function writeVault(vaultPath, vault, passphrase) {
   const envelope = encryptVault(vault, passphrase);
   const directory = path.dirname(vaultPath);
-  const tempPath = `${vaultPath}.tmp`;
+  const tempPath = `${vaultPath}.${process.pid}.${Date.now()}.${Math.random().toString(16).slice(2)}.tmp`;
 
   await fs.mkdir(directory, { recursive: true });
   await fs.writeFile(tempPath, JSON.stringify(envelope, null, 2), {
