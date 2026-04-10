@@ -16,7 +16,7 @@ This repository already provides a complete local CLI. Do not invent a separate 
 - Prefer handles over raw secret values in reasoning, logs, and chat.
 - If the vault is locked, stop and ask the human to unlock it.
 - Do not read or modify the encrypted vault file directly.
-- Prefer narrow actions like list, totp, render-file, and browser-template over ad hoc secret handling.
+- Prefer narrow actions like `get-entry`, filtered `list`, `totp --code-only`, `render-file`, and `browser-template` over ad hoc secret handling.
 
 ## Command Form
 
@@ -61,7 +61,7 @@ AGENTPASS_ACTOR_ID=browser-login node ./src/cli.mjs status
 3. If the service is unreachable, start it with `node ./src/cli.mjs serve`.
 4. If the vault is uninitialized, ask the human to initialize it.
 5. If the vault is locked, ask the human to unlock it.
-6. Once unlocked, use `node ./src/cli.mjs list --json` to discover entries and field handles.
+6. Once unlocked, use `node ./src/cli.mjs get-entry <label> --output handles`, or fall back to `node ./src/cli.mjs list --type <type> --match <text> --json`, to discover entries and field handles.
 
 Do not ask the human to paste the master passphrase into normal chat. If unlock is required, instruct the human to unlock through a trusted local prompt or terminal.
 
@@ -126,13 +126,28 @@ Human-readable listing:
 node ./src/cli.mjs list
 ```
 
+Filtered listing:
+
+```bash
+node ./src/cli.mjs list --type login --match costco
+node ./src/cli.mjs list --tag prod --json
+```
+
 Structured listing:
 
 ```bash
 node ./src/cli.mjs list --json
 ```
 
-Use `--json` whenever you need to programmatically inspect entry labels, types, field ids, handles, or masked previews.
+Direct entry lookup:
+
+```bash
+node ./src/cli.mjs get-entry Costco
+node ./src/cli.mjs get-entry Costco --output handles
+node ./src/cli.mjs get-entry Costco --output handle --field-name password
+```
+
+Use `get-entry` when you already know the label or id and want one entry or one handle without scanning the entire vault. Use `--json` whenever you need to programmatically inspect entry labels, types, field ids, handles, or masked previews.
 
 ### Creating Entries
 
@@ -156,6 +171,16 @@ Add a login entry with prompts:
 node ./src/cli.mjs add-login --label "Costco" --site "https://www.costco.com" --prompt
 ```
 
+Add a login entry while reading a secret from stdin:
+
+```bash
+printf 'super-secret-password\n' | node ./src/cli.mjs add-login \
+  --label "Costco" \
+  --password - \
+  --output handle \
+  --field-name password
+```
+
 Supported login flags:
 
 - `--label <label>`
@@ -171,6 +196,10 @@ Supported login flags:
 - `--prompt-email`
 - `--prompt-password`
 - `--prompt-totp`
+- `--output json|id|handle|handles`
+- `--field-name <name>` when `--output handle` is used
+
+Passing `-` for `--password`, `--totp-seed`, or another direct secret flag reads the value from stdin instead of exposing it in the command line.
 
 Add a card entry:
 
@@ -207,6 +236,8 @@ Supported card flags:
 - `--prompt-year`
 - `--prompt-cvv`
 - `--prompt-postal`
+- `--output json|id|handle|handles`
+- `--field-name <name>` when `--output handle` is used
 
 Add a free-form secret bundle:
 
@@ -229,8 +260,10 @@ Supported secret flags:
 - `--notes <text>`
 - `--tags <csv>`
 - `--prompt`
+- `--output json|id|handle|handles`
+- `--field-name <name>` when `--output handle` is used
 
-Use `--prompt` when the human should enter secret values interactively instead of embedding them in the command line.
+Use `--prompt` when the human should enter secret values interactively instead of embedding them in the command line. Passing `--field name=-` reads that field value from stdin.
 
 ### Editing Entries And Fields
 
@@ -252,6 +285,7 @@ Important field-policy behavior:
 - `--allow-mode <mode>` can be repeated.
 - `--allow-modes <csv>` is also accepted.
 - `--allow-origins <csv>` restricts browser origins.
+- Passing `--value -` reads the updated value from stdin.
 
 Use `edit-field` to update passwords, TOTP seeds, API tokens, or per-field access policy.
 
@@ -277,6 +311,12 @@ Generate a TOTP code:
 node ./src/cli.mjs totp <handle>
 ```
 
+Print only the 6-digit code:
+
+```bash
+node ./src/cli.mjs totp <handle> --code-only
+```
+
 This returns JSON with at least:
 
 - `handle`
@@ -291,6 +331,12 @@ Render a template containing handles:
 
 ```bash
 node ./src/cli.mjs render-file ./examples/login.template.txt
+```
+
+Render a template from stdin:
+
+```bash
+printf 'password={{ COSTCO_PASSWORD_1 }}\n' | node ./src/cli.mjs render-file -
 ```
 
 Render to a chosen output path:
@@ -317,8 +363,10 @@ Supported render-file flags:
 
 Behavior notes:
 
+- Templates can use either bare handles or `{{ HANDLE }}` syntax.
 - If a command is supplied, its stdout and stderr are redacted so known secret values are replaced with handles.
 - If the command tail contains `AGENTPASS_RENDERED_FILE`, that placeholder is replaced with the rendered file path.
+- Temporary rendered files are cleaned up by default unless `--keep` or `--output` is supplied.
 - If no command is supplied, the CLI prints JSON describing the rendered file.
 
 ### Browser Automation
@@ -362,9 +410,9 @@ Use logs when you need to confirm whether a handle use, policy denial, render, u
 
 If Browser MCP or another browser-automation tool is available, combine it with AgentPass like this:
 
-1. Use AgentPass CLI to confirm the vault is unlocked and to discover handles with `list --json`.
+1. Use AgentPass CLI to confirm the vault is unlocked and to discover handles with `get-entry ... --output handles` or `list --json`.
 2. Use Browser MCP to inspect the page, determine the login flow, and identify stable selectors.
-3. If the task is a simple interactive test and a TOTP code is needed, use `node ./src/cli.mjs totp <handle>` for the MFA step.
+3. If the task is a simple interactive test and a TOTP code is needed, use `node ./src/cli.mjs totp <handle> --code-only` for the MFA step.
 4. For actual credential filling, prefer an AgentPass browser template that imports `createAgentPassBrowser()` and calls `fillHandle()` or `fillLogin()`.
 5. Use Browser MCP for navigation, verification, and post-login checks; use AgentPass browser templates for secret resolution and form filling.
 
@@ -402,31 +450,33 @@ node ./src/cli.mjs browser-template ./path/to/template.mjs
 
 1. Run `node ./src/cli.mjs status`.
 2. If locked, ask the human to unlock.
-3. Run `node ./src/cli.mjs list --json`.
-4. Find the entry by label, site, issuer, or provider.
+3. Prefer `node ./src/cli.mjs get-entry <label> --output handles` when the entry is known.
+4. Otherwise use `node ./src/cli.mjs list --type <type> --match <text> --json`.
 5. Extract the needed handle names from the returned fields.
 
 ### Update A Password Or Token
 
-1. Discover the existing field handle with `list --json`.
+1. Discover the existing field handle with `get-entry ... --output handles` or `list --json`.
 2. Run `node ./src/cli.mjs edit-field <handle> --prompt` if the human should enter the new value.
-3. If needed, update policy in the same command with `--allow-mode` or `--allow-origins`.
+3. Use `--value -` if the replacement secret should come from stdin instead of interactive prompt.
+4. If needed, update policy in the same command with `--allow-mode` or `--allow-origins`.
 
 ### Log Into A Site
 
 1. Confirm the vault is unlocked.
-2. Discover username, email, password, and optional TOTP handles with `list --json`.
+2. Discover username, email, password, and optional TOTP handles with `get-entry ... --output handles` or `list --json`.
 3. Use Browser MCP to inspect the login page and determine selectors or login sequence.
 4. Execute a browser template that uses `createAgentPassBrowser()` and `fillHandle()` or `fillLogin()`.
-5. If MFA is required, use `secrets.totp(handle)` inside the template or `node ./src/cli.mjs totp <handle>` if the code must be entered manually.
+5. If MFA is required, use `secrets.totp(handle)` inside the template or `node ./src/cli.mjs totp <handle> --code-only` if the code must be entered manually.
 6. Verify successful login using Browser MCP or the browser automation script.
 
 ### Render A Secret-Populated File
 
 1. Confirm the vault is unlocked.
-2. Ensure the template contains handles, not raw secrets.
-3. Run `node ./src/cli.mjs render-file <template>` with `--output` or a command tail.
+2. Ensure the template contains handles, not raw secrets. Bare handles and `{{ HANDLE }}` are both supported.
+3. Run `node ./src/cli.mjs render-file <template>` with `--output` or a command tail, or use `render-file -` to pass the template via stdin.
 4. Use the rendered file only for the local execution step that needs it.
+5. Rely on default temp-file cleanup unless you intentionally need `--keep` or `--output`.
 
 ## Error Handling
 
@@ -456,8 +506,9 @@ If a browser template exits non-zero:
 
 ## Decision Rules For Agents
 
-- Need structure: use `list --json`.
-- Need a one-time code: use `totp <handle>`.
+- Need one entry or one handle: use `get-entry`.
+- Need structure across many entries: use `list --json`.
+- Need a one-time code: use `totp <handle>` or `totp <handle> --code-only`.
 - Need a file with substitutions: use `render-file`.
 - Need to log into a website: use Browser MCP to inspect and AgentPass browser-template to fill.
 - Need to create or rotate credentials: use `add-*` or `edit-field`.
