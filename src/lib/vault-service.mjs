@@ -18,6 +18,13 @@ function makeLockedError() {
   return error;
 }
 
+function makeSaveBlockedError(cause) {
+  const error = new Error(`Vault writes are blocked because a previous save failed: ${cause?.message || "unknown error"}`);
+  error.code = "VAULT_SAVE_BLOCKED";
+  error.cause = cause;
+  return error;
+}
+
 function defaultActor(actor) {
   return {
     actor_type: actor?.actor_type || actor?.type || "system",
@@ -51,6 +58,48 @@ function normalizeLabelForCompare(label) {
 
 function normalizeFieldNameForCompare(fieldName) {
   return String(fieldName ?? "").trim().toLowerCase();
+}
+
+function normalizeMatchTerm(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function entryMatchesFilters(entry, filters = {}) {
+  const requestedType = normalizeMatchTerm(filters.type);
+
+  if (requestedType && normalizeMatchTerm(entry.entryType) !== requestedType) {
+    return false;
+  }
+
+  const requestedTag = normalizeMatchTerm(filters.tag);
+
+  if (requestedTag) {
+    const hasMatchingTag = (entry.tags || []).some((tag) => normalizeMatchTerm(tag) === requestedTag);
+
+    if (!hasMatchingTag) {
+      return false;
+    }
+  }
+
+  const requestedQuery = normalizeMatchTerm(filters.query);
+
+  if (!requestedQuery) {
+    return true;
+  }
+
+  const searchValues = [
+    entry.id,
+    entry.key,
+    entry.label,
+    entry.site,
+    entry.issuer,
+    entry.provider,
+    entry.notes,
+    ...(entry.tags || []),
+    ...(entry.fields || []).flatMap((field) => [field.fieldName, field.fieldType, field.handle])
+  ];
+
+  return searchValues.some((value) => normalizeMatchTerm(value).includes(requestedQuery));
 }
 
 async function executeChildProcess({ command, cwd, env, timeoutMs = 120000, redactionMap = new Map() }) {
@@ -108,6 +157,7 @@ export class AgentPassService {
     this.vault = null;
     this.passphrase = null;
     this.saveQueue = Promise.resolve();
+    this.saveError = null;
   }
 
   async status() {
@@ -129,6 +179,14 @@ export class AgentPassService {
     }
   }
 
+  ensureCanMutate() {
+    this.ensureUnlocked();
+
+    if (this.saveError) {
+      throw makeSaveBlockedError(this.saveError);
+    }
+  }
+
   async init(passphrase, actor) {
     if (!passphrase) {
       throw new Error("A passphrase is required.");
@@ -141,6 +199,8 @@ export class AgentPassService {
     await ensureDataPaths(this.paths);
     this.vault = createEmptyVault();
     this.passphrase = passphrase;
+    this.saveQueue = Promise.resolve();
+    this.saveError = null;
     await this.save();
     await this.auditLog.append({
       ...defaultActor(actor),
@@ -163,6 +223,8 @@ export class AgentPassService {
 
     this.vault = await readVault(this.paths.vaultPath, passphrase);
     this.passphrase = passphrase;
+    this.saveQueue = Promise.resolve();
+    this.saveError = null;
     await this.auditLog.append({
       ...defaultActor(actor),
       action: "vault.unlock",
@@ -176,6 +238,8 @@ export class AgentPassService {
   async lock(actor) {
     this.vault = null;
     this.passphrase = null;
+    this.saveQueue = Promise.resolve();
+    this.saveError = null;
     await this.auditLog.append({
       ...defaultActor(actor),
       action: "vault.lock",
@@ -190,18 +254,38 @@ export class AgentPassService {
 
   async save() {
     this.ensureUnlocked();
+    if (this.saveError) {
+      throw makeSaveBlockedError(this.saveError);
+    }
+
     const pendingSave = this.saveQueue.then(async () => {
       this.vault.updatedAt = nowIso();
       await ensureDataPaths(this.paths);
       await writeVault(this.paths.vaultPath, this.vault, this.passphrase);
     });
-    this.saveQueue = pendingSave.catch(() => {});
-    await pendingSave;
+    this.saveQueue = pendingSave;
+
+    try {
+      await pendingSave;
+      this.saveError = null;
+    } catch (error) {
+      this.saveError = error;
+      throw error;
+    }
   }
 
-  listEntries() {
+  listEntries(filters = {}) {
     this.ensureUnlocked();
-    return this.vault.entries.map((entry) => sanitizeEntry(entry));
+    return this.vault.entries
+      .filter((entry) => entryMatchesFilters(entry, filters))
+      .map((entry) => sanitizeEntry(entry));
+  }
+
+  getEntry(identifier) {
+    this.ensureUnlocked();
+    const entry = this.findEntry(identifier);
+
+    return entry ? sanitizeEntry(entry) : null;
   }
 
   async listLogs(limit = 200) {
@@ -333,7 +417,7 @@ export class AgentPassService {
   }
 
   async createTypedEntry(entryType, payload, actor) {
-    this.ensureUnlocked();
+    this.ensureCanMutate();
 
     const label = this.dedupeLabel(payload.label);
     const key = this.deriveEntryKeyFromLabel(label);
@@ -376,7 +460,7 @@ export class AgentPassService {
   }
 
   async createSecretEntry(payload, actor) {
-    this.ensureUnlocked();
+    this.ensureCanMutate();
     const label = this.dedupeLabel(payload.label);
     const key = this.deriveEntryKeyFromLabel(label);
     const fields = (payload.fields || [])
@@ -430,7 +514,7 @@ export class AgentPassService {
   }
 
   async updateEntry(identifier, updates, actor) {
-    this.ensureUnlocked();
+    this.ensureCanMutate();
     const entry = this.findEntry(identifier);
 
     if (!entry) {
@@ -483,7 +567,7 @@ export class AgentPassService {
   }
 
   async updateField(identifier, updates, actor) {
-    this.ensureUnlocked();
+    this.ensureCanMutate();
     const match = this.findField(identifier);
 
     if (!match) {
@@ -535,7 +619,7 @@ export class AgentPassService {
   }
 
   async removeEntry(identifier, actor) {
-    this.ensureUnlocked();
+    this.ensureCanMutate();
     const entry = this.findEntry(identifier);
 
     if (!entry) {
@@ -558,7 +642,7 @@ export class AgentPassService {
   }
 
   async removeField(identifier, actor) {
-    this.ensureUnlocked();
+    this.ensureCanMutate();
     const match = this.findField(identifier);
 
     if (!match) {
@@ -581,7 +665,7 @@ export class AgentPassService {
   }
 
   async addField(identifier, fieldName, value, actor, policy) {
-    this.ensureUnlocked();
+    this.ensureCanMutate();
     const entry = this.findEntry(identifier);
 
     if (!entry) {
@@ -642,7 +726,7 @@ export class AgentPassService {
   }
 
   async resolveValueForUse({ handle, useMode, origin, actor, filePath }) {
-    this.ensureUnlocked();
+    this.ensureCanMutate();
     const actorContext = defaultActor(actor);
     const match = this.findField(handle);
 
@@ -751,10 +835,11 @@ export class AgentPassService {
     };
   }
 
-  async renderFile({ templatePath, outputPath, command, cwd, timeoutMs = 120000, keep = false, actor }) {
+  async renderFile({ templatePath, templateContent, templateLabel, outputPath, command, cwd, timeoutMs = 120000, keep = false, actor }) {
     this.ensureUnlocked();
     const actorContext = defaultActor(actor);
-    const template = await fs.readFile(templatePath, "utf8");
+    const templateSource = templatePath ? path.resolve(templatePath) : (templateLabel || "<stdin>");
+    const template = templateContent ?? await fs.readFile(templatePath, "utf8");
     const knownHandles = [...this.buildHandleMap().keys()].filter((handle) => template.includes(handle));
     const replacementMap = new Map();
 
@@ -763,72 +848,74 @@ export class AgentPassService {
         handle,
         useMode: "file_render",
         actor: actorContext,
-        filePath: outputPath || templatePath
+        filePath: outputPath || templateSource
       });
       replacementMap.set(handle, result.value);
     }
 
     const rendered = replaceHandles(template, replacementMap);
-    const shouldKeepTempFile = Boolean(keep || outputPath || !command?.length);
+    const shouldKeepTempFile = Boolean(keep || outputPath);
     let renderedFilePath = outputPath ? path.resolve(outputPath) : null;
     let cleanup = async () => {};
-
-    if (outputPath) {
-      await fs.mkdir(path.dirname(renderedFilePath), {
-        recursive: true
-      });
-      await fs.writeFile(renderedFilePath, rendered, {
-        encoding: "utf8",
-        mode: 0o600
-      });
-      await fs.chmod(renderedFilePath, 0o600);
-    } else {
-      const tempFile = await writeRenderedTempFile({
-        sourcePath: templatePath,
-        content: rendered
-      });
-      renderedFilePath = tempFile.filePath;
-      cleanup = tempFile.cleanup;
-    }
-
     let execution = null;
 
-    if (command?.length) {
-      const finalCommand = command.some((part) => part === "AGENTPASS_RENDERED_FILE")
-        ? command.map((part) => (part === "AGENTPASS_RENDERED_FILE" ? renderedFilePath : part))
-        : [...command, renderedFilePath];
+    try {
+      if (outputPath) {
+        await fs.mkdir(path.dirname(renderedFilePath), {
+          recursive: true
+        });
+        await fs.writeFile(renderedFilePath, rendered, {
+          encoding: "utf8",
+          mode: 0o600
+        });
+        await fs.chmod(renderedFilePath, 0o600);
+      } else {
+        const tempFile = await writeRenderedTempFile({
+          sourcePath: templatePath || templateLabel,
+          content: rendered
+        });
+        renderedFilePath = tempFile.filePath;
+        cleanup = tempFile.cleanup;
+      }
 
-      execution = await executeChildProcess({
-        command: finalCommand,
-        cwd,
-        env: {
-          AGENTPASS_RENDERED_FILE: renderedFilePath
-        },
-        timeoutMs,
-        redactionMap: replacementMap
+      if (command?.length) {
+        const finalCommand = command.some((part) => part === "AGENTPASS_RENDERED_FILE")
+          ? command.map((part) => (part === "AGENTPASS_RENDERED_FILE" ? renderedFilePath : part))
+          : [...command, renderedFilePath];
+
+        execution = await executeChildProcess({
+          command: finalCommand,
+          cwd,
+          env: {
+            AGENTPASS_RENDERED_FILE: renderedFilePath
+          },
+          timeoutMs,
+          redactionMap: replacementMap
+        });
+      }
+
+      await this.auditLog.append({
+        ...actorContext,
+        action: "file.render.complete",
+        target_type: "file",
+        target_id: templateSource,
+        file_path: renderedFilePath,
+        result: execution?.exitCode && execution.exitCode !== 0 ? "failure" : "success",
+        message: redactTemplateContent(`rendered ${knownHandles.length} handles`, replacementMap)
       });
+
+      return {
+        templatePath: templatePath ? path.resolve(templatePath) : null,
+        templateSource,
+        renderedFilePath,
+        kept: shouldKeepTempFile,
+        execution
+      };
+    } finally {
+      if (!shouldKeepTempFile && !outputPath) {
+        await cleanup();
+      }
     }
-
-    await this.auditLog.append({
-      ...actorContext,
-      action: "file.render.complete",
-      target_type: "file",
-      target_id: templatePath,
-      file_path: renderedFilePath,
-      result: execution?.exitCode && execution.exitCode !== 0 ? "failure" : "success",
-      message: redactTemplateContent(`rendered ${knownHandles.length} handles`, replacementMap)
-    });
-
-    if (!shouldKeepTempFile && !outputPath) {
-      await cleanup();
-    }
-
-    return {
-      templatePath: path.resolve(templatePath),
-      renderedFilePath,
-      kept: shouldKeepTempFile,
-      execution
-    };
   }
 }
 

@@ -2,6 +2,21 @@ function sortByDescendingLength(values) {
   return [...values].sort((left, right) => right.length - left.length);
 }
 
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function createHandlePattern(handles) {
+  const parts = sortByDescendingLength([...handles]).map((handle) => escapeRegExp(handle));
+
+  if (!parts.length) {
+    return null;
+  }
+
+  const alternation = parts.join("|");
+  return new RegExp(`{{\\s*(${alternation})\\s*}}|(${alternation})`, "g");
+}
+
 export function buildHandleMap(vault) {
   const map = new Map();
 
@@ -19,14 +34,16 @@ export function replaceHandles(text, handleMap) {
     return text;
   }
 
-  let output = text;
-  const handles = sortByDescendingLength(handleMap.keys());
+  const pattern = createHandlePattern(handleMap.keys());
 
-  for (const handle of handles) {
-    output = output.split(handle).join(handleMap.get(handle));
+  if (!pattern) {
+    return text;
   }
 
-  return output;
+  return text.replace(pattern, (match, wrappedHandle, bareHandle) => {
+    const handle = wrappedHandle || bareHandle;
+    return handleMap.get(handle) ?? match;
+  });
 }
 
 export function replaceHandlesInArray(values, handleMap) {

@@ -19,22 +19,24 @@ Commands:
   agentpass init
   agentpass unlock
   agentpass lock
-  agentpass list [--json]
-  agentpass add-login --label <label> [--site <url>] [--notes <text>] [--tags <csv>] [--prompt]
-  agentpass add-card --label <label> [--issuer <issuer>] [--notes <text>] [--tags <csv>] [--prompt]
-  agentpass add-secret --label <label> [--provider <name>] [--field <name=value> ...] [--notes <text>] [--tags <csv>] [--prompt]
+  agentpass list [--type <login|card|secret>] [--match <text>] [--tag <tag>] [--json]
+  agentpass get-entry <entry-id-or-label> [--field-name <name>] [--output text|json|id|handle|handles]
+  agentpass add-login --label <label> [--site <url>] [--notes <text>] [--tags <csv>] [--prompt] [--field-name <name>] [--output json|id|handle|handles]
+  agentpass add-card --label <label> [--issuer <issuer>] [--notes <text>] [--tags <csv>] [--prompt] [--field-name <name>] [--output json|id|handle|handles]
+  agentpass add-secret --label <label> [--provider <name>] [--field <name=value> ...] [--notes <text>] [--tags <csv>] [--prompt] [--field-name <name>] [--output json|id|handle|handles]
   agentpass edit-entry <entry-id-or-label> [--label <label>] [--site <url>] [--issuer <issuer>] [--provider <name>] [--notes <text>] [--tags <csv>]
   agentpass edit-field <field-id-or-handle> [--value <value>] [--prompt] [--disabled true|false] [--allow-mode <mode>] [--allow-origins <csv>]
   agentpass remove-entry <entry-id-or-key>
   agentpass remove-field <field-id-or-handle>
-  agentpass totp <handle>
-  agentpass render-file <template-path> [--output <path>] [--keep] [--cwd <dir>] [--timeout-ms <ms>] -- <command ...>
+  agentpass totp <handle> [--code-only]
+  agentpass render-file <template-path|-> [--output <path>] [--keep] [--cwd <dir>] [--timeout-ms <ms>] -- <command ...>
   agentpass browser-template <template-path> [--cwd <dir>] [--timeout-ms <ms>] -- [args ...]
   agentpass logs [--limit <n>] [--json]
 
 Notes:
   - Run \`agentpass serve\` first.
   - Agents should use handles, not raw values, after creation.
+  - Secret options can read from stdin by passing \`-\` as the value.
 `;
 }
 
@@ -122,6 +124,70 @@ function printEntries(entries) {
   }
 }
 
+function normalizeFieldName(value) {
+  return String(value ?? "").trim().toLowerCase();
+}
+
+function resolveOutputMode(args, defaultMode = "json") {
+  if (hasFlag(args, "--json")) {
+    return "json";
+  }
+
+  return parseOptionValue(args, "--output") || defaultMode;
+}
+
+function selectEntryField(entry, fieldName) {
+  if (fieldName) {
+    const match = entry.fields.find((field) => normalizeFieldName(field.fieldName) === normalizeFieldName(fieldName));
+
+    if (!match) {
+      throw new Error(`Entry ${entry.label} does not have a ${fieldName} field.`);
+    }
+
+    return match;
+  }
+
+  if (entry.fields.length !== 1) {
+    throw new Error(`Entry ${entry.label} has multiple fields. Use --field-name <name>.`);
+  }
+
+  return entry.fields[0];
+}
+
+function printEntryResult(entry, args, defaultMode = "json") {
+  const outputMode = resolveOutputMode(args, defaultMode);
+
+  if (outputMode === "json") {
+    console.log(JSON.stringify(entry, null, 2));
+    return;
+  }
+
+  if (outputMode === "text") {
+    console.log(formatEntry(entry));
+    return;
+  }
+
+  if (outputMode === "id") {
+    console.log(entry.id);
+    return;
+  }
+
+  if (outputMode === "handles") {
+    for (const field of entry.fields) {
+      console.log(`${field.fieldName}=${field.handle}`);
+    }
+
+    return;
+  }
+
+  if (outputMode === "handle") {
+    console.log(selectEntryField(entry, parseOptionValue(args, "--field-name")).handle);
+    return;
+  }
+
+  throw new Error(`Unsupported output mode: ${outputMode}`);
+}
+
 function printLogs(events) {
   if (!events.length) {
     console.log("No logs yet.");
@@ -159,8 +225,45 @@ async function promptFieldValue(label, { secret = false } = {}) {
   return secret ? await promptSecret(`${label}: `) : await promptLine(`${label}: `);
 }
 
-async function maybePromptValue(args, optionName, promptLabel, { secret = false, promptFlagName, promptAll = false } = {}) {
+let stdinTextPromise = null;
+
+async function readStdinText() {
+  if (!stdinTextPromise) {
+    stdinTextPromise = (async () => {
+      if (process.stdin.isTTY) {
+        throw new Error("Expected piped stdin input.");
+      }
+
+      let input = "";
+
+      for await (const chunk of process.stdin) {
+        input += chunk.toString();
+      }
+
+      return input;
+    })();
+  }
+
+  return await stdinTextPromise;
+}
+
+async function readStdinValue() {
+  const input = await readStdinText();
+  return input.replace(/[\r\n]+$/u, "");
+}
+
+async function readOptionValue(args, optionName) {
   const directValue = parseOptionValue(args, optionName);
+
+  if (directValue !== "-") {
+    return directValue;
+  }
+
+  return await readStdinValue();
+}
+
+async function maybePromptValue(args, optionName, promptLabel, { secret = false, promptFlagName, promptAll = false } = {}) {
+  const directValue = await readOptionValue(args, optionName);
 
   if (directValue !== undefined) {
     return directValue;
@@ -175,8 +278,10 @@ async function maybePromptValue(args, optionName, promptLabel, { secret = false,
   return undefined;
 }
 
-function parseSecretFieldArgs(args) {
-  return parseRepeatedValues(args, "--field").map((value) => {
+async function parseSecretFieldArgs(args) {
+  const fields = [];
+
+  for (const value of parseRepeatedValues(args, "--field")) {
     const separatorIndex = value.indexOf("=");
 
     if (separatorIndex <= 0) {
@@ -184,17 +289,20 @@ function parseSecretFieldArgs(args) {
     }
 
     const name = value.slice(0, separatorIndex).trim();
-    const fieldValue = value.slice(separatorIndex + 1);
+    const rawFieldValue = value.slice(separatorIndex + 1);
+    const fieldValue = rawFieldValue === "-" ? await readStdinValue() : rawFieldValue;
 
     if (!name || !fieldValue.trim()) {
       throw new Error(`Invalid --field value: ${value}. Use name=value.`);
     }
 
-    return {
+    fields.push({
       name,
       value: fieldValue
-    };
-  });
+    });
+  }
+
+  return fields;
 }
 
 async function promptSecretFields() {
@@ -315,14 +423,48 @@ async function run() {
   }
 
   if (commandName === "list") {
-    const entries = await api("/api/entries");
+    const params = new URLSearchParams();
+    const typeFilter = parseOptionValue(argv, "--type");
+    const matchFilter = parseOptionValue(argv, "--match");
+    const tagFilter = parseOptionValue(argv, "--tag");
 
-    if (hasFlag(argv, "--json")) {
+    if (typeFilter) {
+      params.set("type", typeFilter);
+    }
+
+    if (matchFilter) {
+      params.set("match", matchFilter);
+    }
+
+    if (tagFilter) {
+      params.set("tag", tagFilter);
+    }
+
+    const entries = await api(`/api/entries${params.size ? `?${params}` : ""}`);
+
+    if (resolveOutputMode(argv, "text") === "json") {
       console.log(JSON.stringify(entries, null, 2));
       return;
     }
 
+    if (!entries.length && (typeFilter || matchFilter || tagFilter)) {
+      console.log("No matching entries.");
+      return;
+    }
+
     printEntries(entries);
+    return;
+  }
+
+  if (commandName === "get-entry") {
+    const [identifier, ...rest] = argv;
+
+    if (!identifier) {
+      throw new Error("Usage: agentpass get-entry <entry-id-or-label> [...]");
+    }
+
+    const entry = await api(`/api/entries/${encodeURIComponent(identifier)}`);
+    printEntryResult(entry, rest, "text");
     return;
   }
 
@@ -362,10 +504,11 @@ async function run() {
       throw new Error("Usage: agentpass add-login --label <label> [...]");
     }
 
-    console.log(JSON.stringify(await api("/api/entries/login", {
+    const result = await api("/api/entries/login", {
       method: "POST",
       body: JSON.stringify(payload)
-    }), null, 2));
+    });
+    printEntryResult(result, rest);
     return;
   }
 
@@ -413,17 +556,18 @@ async function run() {
       throw new Error("Usage: agentpass add-card --label <label> [...]");
     }
 
-    console.log(JSON.stringify(await api("/api/entries/card", {
+    const result = await api("/api/entries/card", {
       method: "POST",
       body: JSON.stringify(payload)
-    }), null, 2));
+    });
+    printEntryResult(result, rest);
     return;
   }
 
   if (commandName === "add-secret") {
     const promptAll = hasFlag(argv, "--prompt");
     const label = parseOptionValue(argv, "--label");
-    const directFields = parseSecretFieldArgs(argv);
+    const directFields = await parseSecretFieldArgs(argv);
     const promptedFields = promptAll ? await promptSecretFields() : [];
     const payload = {
       label,
@@ -441,10 +585,11 @@ async function run() {
       throw new Error("Provide at least one --field <name=value> or use --prompt.");
     }
 
-    console.log(JSON.stringify(await api("/api/entries/secret", {
+    const result = await api("/api/entries/secret", {
       method: "POST",
       body: JSON.stringify(payload)
-    }), null, 2));
+    });
+    printEntryResult(result, argv);
     return;
   }
 
@@ -477,7 +622,7 @@ async function run() {
     }
 
     const promptValue = hasFlag(rest, "--prompt");
-    const value = parseOptionValue(rest, "--value") ?? (promptValue ? await promptSecret("New field value: ") : undefined);
+    const value = (await readOptionValue(rest, "--value")) ?? (promptValue ? await promptSecret("New field value: ") : undefined);
     const disabledRaw = parseOptionValue(rest, "--disabled");
     const allowedModes = normalizeStringList([
       ...parseRepeatedValues(rest, "--allow-mode"),
@@ -536,16 +681,23 @@ async function run() {
   }
 
   if (commandName === "totp") {
-    const [handle] = argv;
+    const [handle, ...rest] = argv;
 
     if (!handle) {
       throw new Error("Usage: agentpass totp <handle>");
     }
 
-    console.log(JSON.stringify(await api("/api/totp", {
+    const result = await api("/api/totp", {
       method: "POST",
       body: JSON.stringify({ handle })
-    }), null, 2));
+    });
+
+    if (hasFlag(rest, "--code-only")) {
+      console.log(result.code);
+      return;
+    }
+
+    console.log(JSON.stringify(result, null, 2));
     return;
   }
 
@@ -553,14 +705,16 @@ async function run() {
     const [templatePath, ...rest] = argv;
 
     if (!templatePath) {
-      throw new Error("Usage: agentpass render-file <template-path> [options] -- <command ...>");
+      throw new Error("Usage: agentpass render-file <template-path|-> [options] -- <command ...>");
     }
 
     const { head, tail } = parseCommandTail(rest);
     const result = await api("/api/render-file", {
       method: "POST",
       body: JSON.stringify({
-        templatePath,
+        templatePath: templatePath === "-" ? undefined : templatePath,
+        templateContent: templatePath === "-" ? await readStdinText() : undefined,
+        templateLabel: templatePath === "-" ? "<stdin>" : undefined,
         outputPath: parseOptionValue(head, "--output"),
         keep: hasFlag(head, "--keep"),
         cwd: parseOptionValue(head, "--cwd"),

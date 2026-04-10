@@ -315,3 +315,73 @@ test("service serializes concurrent saves safely", async () => {
     await cleanupDataDir(dataDir);
   }
 });
+
+test("service renders wrapped handles and cleans temp files by default", async () => {
+  const { dataDir, service } = await createTempService();
+  const templatePath = path.join(dataDir, "wrapped.template.txt");
+
+  try {
+    await service.createLoginEntry({
+      label: "Costco",
+      site: "https://www.costco.com",
+      fieldValues: {
+        password: "hunter2"
+      }
+    }, {
+      actor_type: "agent",
+      actor_id: "test"
+    });
+    await fs.writeFile(templatePath, "password={{ COSTCO_PASSWORD_1 }}\n", "utf8");
+
+    const result = await service.renderFile({
+      templatePath,
+      actor: {
+        actor_type: "agent",
+        actor_id: "test"
+      }
+    });
+
+    assert.equal(result.kept, false);
+    await assert.rejects(async () => {
+      await fs.access(result.renderedFilePath);
+    });
+  } finally {
+    await cleanupDataDir(dataDir);
+  }
+});
+
+test("service blocks subsequent writes after a save failure", async () => {
+  const { dataDir, service } = await createTempService();
+
+  try {
+    service.paths.vaultPath = dataDir;
+
+    await assert.rejects(async () => {
+      await service.createLoginEntry({
+        label: "Broken Save",
+        site: "https://example.com",
+        fieldValues: {
+          password: "hunter2"
+        }
+      }, {
+        actor_type: "agent",
+        actor_id: "test"
+      });
+    });
+
+    await assert.rejects(async () => {
+      await service.createSecretEntry({
+        label: "Should Block",
+        provider: "Example",
+        fields: [
+          { name: "api_token", value: "secret" }
+        ]
+      }, {
+        actor_type: "agent",
+        actor_id: "test"
+      });
+    }, /previous save failed/i);
+  } finally {
+    await cleanupDataDir(dataDir);
+  }
+});

@@ -59,7 +59,11 @@ export async function startServer({ host = "127.0.0.1", port = 4765, dataDir, va
       }
 
       if (request.method === "GET" && url.pathname === "/api/entries") {
-        sendJson(response, 200, service.listEntries());
+        sendJson(response, 200, service.listEntries({
+          type: url.searchParams.get("type"),
+          query: url.searchParams.get("match"),
+          tag: url.searchParams.get("tag")
+        }));
         return;
       }
 
@@ -102,6 +106,8 @@ export async function startServer({ host = "127.0.0.1", port = 4765, dataDir, va
         const body = await readJsonBody(request);
         sendJson(response, 200, await service.renderFile({
           templatePath: body.templatePath,
+          templateContent: body.templateContent,
+          templateLabel: body.templateLabel,
           outputPath: body.outputPath,
           command: body.command,
           cwd: body.cwd,
@@ -113,6 +119,18 @@ export async function startServer({ host = "127.0.0.1", port = 4765, dataDir, va
       }
 
       const entryMatch = routeMatch(url.pathname, /^\/api\/entries\/([^/]+)$/u);
+
+      if (entryMatch && request.method === "GET") {
+        const entry = service.getEntry(entryMatch[0]);
+
+        if (!entry) {
+          sendNotFound(response);
+          return;
+        }
+
+        sendJson(response, 200, entry);
+        return;
+      }
 
       if (entryMatch && request.method === "PATCH") {
         const body = await readJsonBody(request);
@@ -159,9 +177,12 @@ export async function startServer({ host = "127.0.0.1", port = 4765, dataDir, va
     server.listen(port, host, resolve);
   });
 
+  const address = server.address();
+  const resolvedPort = typeof address === "object" && address ? address.port : port;
+
   return {
     host,
-    port,
+    port: resolvedPort,
     server,
     service
   };

@@ -13,7 +13,7 @@ V1 is built around a simple safety boundary:
 
 This is strong protection against accidental leakage into model context and normal logs. It is not full protection against a malicious local process with the same OS permissions.
 
-## V1.1 Features
+## V1.2 Features
 
 - AES-256-GCM encrypted vault file with `scrypt`-derived keys
 - login entries with `username`, `email`, `password`, and `TOTP seed`
@@ -21,8 +21,12 @@ This is strong protection against accidental leakage into model context and norm
 - free-form secret entries with arbitrary named fields such as `api_token`, `account_id`, `DATABASE_URL`, or `region`
 - hidden internal keys derived from labels with automatic label dedupe like `Costco`, `Costco (1)`, and `Costco (2)`
 - masked previews and opaque handles for sensitive fields
+- `{{ HANDLE }}` and bare-handle substitution for templates
+- filtered CLI lookup with `list --type/--match/--tag` and `get-entry`
+- concise CLI output modes such as `totp --code-only` and `--output handle`
+- stdin secret input with `--password -`, `--value -`, and `--field name=-`
 - browser replacement through a Playwright-oriented helper
-- file replacement through temporary rendered files
+- file replacement through temporary rendered files with cleanup by default
 - append-only JSONL audit logs with hash chaining
 - minimal per-field policies:
   - `disabled`
@@ -52,6 +56,16 @@ node ./src/cli.mjs add-login \
   --username "ray@example.com" \
   --password "super-secret-password" \
   --totp-seed "JBSWY3DPEHPK3PXP"
+```
+
+Or pipe a secret in and print just the password handle:
+
+```bash
+printf 'super-secret-password\n' | node ./src/cli.mjs add-login \
+  --label "Costco" \
+  --password - \
+  --output handle \
+  --field-name password
 ```
 
 Add a card:
@@ -85,10 +99,23 @@ List entries and handles:
 node ./src/cli.mjs list
 ```
 
+Look up one entry or filter results:
+
+```bash
+node ./src/cli.mjs get-entry Costco --output handle --field-name password
+node ./src/cli.mjs list --type login --match costco
+```
+
 Generate a TOTP code by handle:
 
 ```bash
 node ./src/cli.mjs totp COSTCO_TOTP_SEED_1
+```
+
+Print only the current code:
+
+```bash
+node ./src/cli.mjs totp COSTCO_TOTP_SEED_1 --code-only
 ```
 
 Open the web UI:
@@ -103,10 +130,20 @@ Render a template with handles:
 node ./src/cli.mjs render-file ./examples/login.template.txt
 ```
 
+Templates can use either bare handles or `{{ HANDLE }}` syntax. Temporary rendered files are removed automatically unless you pass `--keep` or `--output`.
+
 Render a template and run a command against the rendered file:
 
 ```bash
 node ./src/cli.mjs render-file ./examples/login.template.txt -- \
+  node -e "console.log(require('node:fs').readFileSync(process.argv[1], 'utf8'))" \
+  AGENTPASS_RENDERED_FILE
+```
+
+Render a one-off template from stdin without creating a source template file:
+
+```bash
+printf 'password={{ COSTCO_PASSWORD_1 }}\n' | node ./src/cli.mjs render-file - -- \
   node -e "console.log(require('node:fs').readFileSync(process.argv[1], 'utf8'))" \
   AGENTPASS_RENDERED_FILE
 ```

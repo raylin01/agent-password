@@ -13,6 +13,15 @@ test("replaces handles in text", () => {
   assert.equal(result, "login ray@example.com hunter2");
 });
 
+test("replaces wrapped handles in text", () => {
+  const map = new Map([
+    ["COSTCO_COM_PASSWORD_1", "hunter2"]
+  ]);
+
+  const result = replaceHandles("password={{ COSTCO_COM_PASSWORD_1 }}", map);
+  assert.equal(result, "password=hunter2");
+});
+
 test("redacts secrets back to handles", () => {
   const map = new Map([
     ["COSTCO_COM_PASSWORD_1", "hunter2"]
